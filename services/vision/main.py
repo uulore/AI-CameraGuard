@@ -1,6 +1,5 @@
 import os
 import time
-import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,29 +15,22 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# Config
 DATABASE_URL   = os.environ["DATABASE_URL"]
-VIDEO_SOURCE   = os.environ.get("VIDEO_SOURCE", "0")   # path or "0" for webcam
+VIDEO_SOURCE   = os.environ.get("VIDEO_SOURCE", "0")
 CAMERA_ID      = os.environ.get("CAMERA_ID", "cam_01")
 SNAPSHOT_DIR   = Path(os.environ.get("SNAPSHOT_DIR", "/app/snapshots"))
 CONFIDENCE_MIN = float(os.environ.get("CONFIDENCE_MIN", "0.45"))
-FRAME_SKIP     = int(os.environ.get("FRAME_SKIP", "5"))  # process every Nth frame
+FRAME_SKIP     = int(os.environ.get("FRAME_SKIP", "5"))
 
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── YOLO labels we care about (COCO) ─────────────────────────────────────────
+# COCO class ids to watch
 WATCH_CLASSES = {
-    0:  "person",
-    # 63: "laptop",   # раскомментируй по необходимости
-    # 67: "cell phone",
+    0: "person",
 }
 
-# Simple heuristic triggers on top of raw detections
 def classify_event(detections: list[dict]) -> tuple[str, str]:
-    """
-    Returns (event_type, human_description).
-    detections = [{"label": str, "conf": float, "bbox": [x1,y1,x2,y2]}, ...]
-    """
     persons = [d for d in detections if d["label"] == "person"]
     count   = len(persons)
 
@@ -51,7 +43,7 @@ def classify_event(detections: list[dict]) -> tuple[str, str]:
     return "person_detected", f"{count} persons detected"
 
 
-# ── DB helpers ────────────────────────────────────────────────────────────────
+# DB
 def get_conn():
     for attempt in range(10):
         try:
@@ -77,7 +69,7 @@ def insert_event(conn, event_type, confidence, description, snapshot_path, meta)
     conn.commit()
 
 
-# ── Snapshot ──────────────────────────────────────────────────────────────────
+# Snapshot
 def save_snapshot(frame, event_type: str) -> str:
     ts   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     name = f"{CAMERA_ID}_{event_type}_{ts}.jpg"
@@ -86,14 +78,13 @@ def save_snapshot(frame, event_type: str) -> str:
     return str(path)
 
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
+# Main loop
 def main():
-    model = YOLO("yolov8n.pt")   # nano — быстро на M1, ~6ms/frame
+    model = YOLO("yolov8n.pt")
     log.info(f"YOLO loaded, watching: {VIDEO_SOURCE}")
 
     conn = get_conn()
 
-    # Loop video file continuously (для демо)
     while True:
         cap = cv2.VideoCapture(VIDEO_SOURCE if VIDEO_SOURCE != "0" else 0)
         if not cap.isOpened():
@@ -101,9 +92,9 @@ def main():
             time.sleep(5)
             continue
 
-        fps         = cap.get(cv2.CAP_PROP_FPS) or 25
-        frame_idx   = 0
-        last_event  = None   # дедупликация: не спамить одинаковыми событиями
+        fps        = cap.get(cv2.CAP_PROP_FPS) or 25
+        frame_idx  = 0
+        last_event = None
 
         log.info(f"Stream opened, FPS={fps:.1f}")
 
@@ -117,10 +108,9 @@ def main():
             if frame_idx % FRAME_SKIP != 0:
                 continue
 
-            # ── Inference ─────────────────────────────────────────────────
-            results = model(frame, verbose=False)[0]
-
+            results    = model(frame, verbose=False)[0]
             detections = []
+
             for box in results.boxes:
                 cls_id = int(box.cls[0])
                 if cls_id not in WATCH_CLASSES:
@@ -131,16 +121,11 @@ def main():
                     "bbox":  [round(float(v), 1) for v in box.xyxy[0].tolist()],
                 })
 
-            # фильтр по confidence
             detections = [d for d in detections if d["conf"] >= CONFIDENCE_MIN]
-
             event_type, description = classify_event(detections)
 
-            # пропускаем "no_person" чтоб не засорять БД
             if event_type == "no_person":
                 continue
-
-            # дедупликация: пишем в БД только если событие сменилось
             if event_type == last_event:
                 continue
             last_event = event_type
@@ -153,9 +138,9 @@ def main():
             snapshot_path = save_snapshot(frame, event_type)
             insert_event(
                 conn,
-                event_type  = event_type,
-                confidence  = avg_conf,
-                description = description,
+                event_type    = event_type,
+                confidence    = avg_conf,
+                description   = description,
                 snapshot_path = snapshot_path,
                 meta = {
                     "frame_idx":  frame_idx,

@@ -1,4 +1,4 @@
-ultralytics==8.2.18
+ultralytics==8.3.136
 opencv-python-headless==4.9.0.80
 psycopg2-binary==2.9.9
 Pillow==10.3.0
