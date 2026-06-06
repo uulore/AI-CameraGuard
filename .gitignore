@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+.DS_Store
+videos/
+snapshots/
+ollama_data/
+postgres_data/

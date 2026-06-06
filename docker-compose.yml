@@ -1,0 +1,49 @@
+version: "3.9"
+
+services:
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: camera
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  api:
+    build: ./services/api
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - ollama
+    environment:
+      DATABASE_URL: postgresql://admin:admin@postgres:5432/camera
+      OLLAMA_URL: http://ollama:11434
+
+  vision:
+    build: ./services/vision
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgresql://admin:admin@postgres:5432/camera
+      VIDEO_SOURCE: /videos/demo.mp4
+    volumes:
+      - ./videos:/videos
+      - snapshots:/app/snapshots
+
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  postgres_data:
+  snapshots:
+  ollama_data:
