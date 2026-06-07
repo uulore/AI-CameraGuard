@@ -20,10 +20,9 @@ services:
       - "8000:8000"
     depends_on:
       - postgres
-      - ollama
     environment:
       DATABASE_URL: postgresql://admin:admin@postgres:5432/camera
-      OLLAMA_URL: http://ollama:11434
+      OLLAMA_URL: http://host.docker.internal:11434
 
   vision:
     build: ./services/vision
@@ -36,14 +35,6 @@ services:
       - ./videos:/videos
       - snapshots:/app/snapshots
 
-  ollama:
-    image: ollama/ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-
 volumes:
   postgres_data:
   snapshots:
-  ollama_data:

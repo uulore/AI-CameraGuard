@@ -94,8 +94,8 @@ Question: {natural_query}"""
 
     response = httpx.post(
         f"{OLLAMA_URL}/api/generate",
-        json={"model": LLM_MODEL, "prompt": sql_prompt, "stream": False, "options": {"think": False}},
-        timeout=120.0
+        json={"model": LLM_MODEL, "prompt": sql_prompt, "stream": False, "keep_alive": "10m", "options": {"think": False}},
+        timeout=300.0
     )
     response.raise_for_status()
     sql = response.json()["response"].strip().rstrip(";")
@@ -121,8 +121,8 @@ Focus on facts: times, counts, event types. Be brief."""
 
     response = httpx.post(
         f"{OLLAMA_URL}/api/generate",
-        json={"model": LLM_MODEL, "prompt": answer_prompt, "stream": False, "options": {"think": False}},
-        timeout=120.0
+        json={"model": LLM_MODEL, "prompt": answer_prompt, "stream": False, "keep_alive": "10m", "options": {"think": False}},
+        timeout=300.0
     )
     response.raise_for_status()
     answer = response.json()["response"].strip()
