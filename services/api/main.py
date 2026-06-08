@@ -1,11 +1,13 @@
 import os
 import time
 import logging
+import threading
 import httpx
 import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from psycopg2.extras import Json
 
 logging.basicConfig(
     level=logging.INFO,
@@ -15,7 +17,7 @@ log = logging.getLogger(__name__)
 
 # Config
 DATABASE_URL = os.environ["DATABASE_URL"]
-OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://ollama:11434")
+OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434")
 LLM_MODEL    = os.environ.get("LLM_MODEL", "qwen3:8b")
 
 app = FastAPI(title="AI Camera Guard API")
@@ -35,10 +37,58 @@ def get_conn():
 
 conn = None
 
+
+def insert_event_direct(event_type, confidence, description, meta, camera_id, track_id=None):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO events
+                (camera_id, event_type, confidence, description, snapshot_path, raw_meta, track_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (camera_id, event_type, confidence, description, None, Json(meta), track_id),
+        )
+    conn.commit()
+
+
+def run_background_checks():
+    while True:
+        time.sleep(1800)
+        try:
+            welfare = welfare_check(hours=48)
+            for alert in welfare["alerts"]:
+                insert_event_direct(
+                    event_type  = "welfare_alert",
+                    confidence  = 1.0,
+                    description = f"Person {alert['track_id']} on {alert['camera_id']} inside for {alert['hours_inside']:.1f}h",
+                    meta        = dict(alert),
+                    camera_id   = alert["camera_id"],
+                    track_id    = alert["track_id"],
+                )
+                log.warning(f"[welfare_alert] {alert}")
+
+            traffic = traffic_check(window_minutes=60, threshold=5)
+            for alert in traffic["alerts"]:
+                insert_event_direct(
+                    event_type  = "traffic_alert",
+                    confidence  = 1.0,
+                    description = f"{alert['unique_persons']} unique persons on {alert['camera_id']} in 60min",
+                    meta        = dict(alert),
+                    camera_id   = alert["camera_id"],
+                )
+                log.warning(f"[traffic_alert] {alert}")
+
+        except Exception as e:
+            log.error(f"Background check error: {e}")
+
+
 @app.on_event("startup")
 def startup():
     global conn
     conn = get_conn()
+    thread = threading.Thread(target=run_background_checks, daemon=True)
+    thread.start()
+    log.info("Background checks started")
 
 
 @app.get("/health")
@@ -62,6 +112,55 @@ def get_events(limit: int = 50, event_type: str = None):
         return cur.fetchall()
 
 
+@app.get("/welfare/check")
+def welfare_check(hours: int = 48):
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT DISTINCT ON (camera_id, track_id)
+                camera_id,
+                track_id,
+                created_at as entered_at,
+                EXTRACT(EPOCH FROM (NOW() - created_at)) / 3600 as hours_inside
+            FROM events
+            WHERE event_type = 'person_entered'
+              AND track_id NOT IN (
+                SELECT track_id FROM events
+                WHERE event_type = 'person_exited'
+                  AND track_id IS NOT NULL
+              )
+              AND created_at < NOW() - INTERVAL '1 hour'
+            ORDER BY camera_id, track_id, created_at DESC
+        """)
+        rows = cur.fetchall()
+    alerts = [r for r in rows if r["hours_inside"] >= hours]
+    return {"threshold_hours": hours, "alerts": alerts, "total": len(alerts)}
+
+
+@app.get("/traffic/check")
+def traffic_check(window_minutes: int = 60, threshold: int = 5):
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT
+                camera_id,
+                COUNT(DISTINCT track_id) as unique_persons,
+                MIN(created_at) as window_start,
+                MAX(created_at) as window_end
+            FROM events
+            WHERE event_type = 'person_entered'
+              AND created_at > NOW() - (%(minutes)s || ' minutes')::INTERVAL
+              AND track_id IS NOT NULL
+            GROUP BY camera_id
+            HAVING COUNT(DISTINCT track_id) >= %(threshold)s
+        """, {"minutes": window_minutes, "threshold": threshold})
+        rows = cur.fetchall()
+    return {
+        "window_minutes": window_minutes,
+        "threshold": threshold,
+        "alerts": rows,
+        "total": len(rows)
+    }
+
+
 class ChatRequest(BaseModel):
     message: str
 
@@ -77,11 +176,15 @@ def query_events_db(natural_query: str) -> tuple[str, str]:
       id            SERIAL PRIMARY KEY
       created_at    TIMESTAMPTZ
       camera_id     TEXT
-      event_type    TEXT
+      event_type    TEXT        -- values: person_detected, crowd_detected, person_entered,
+                                --   person_exited, bulk_cargo_exit, weapon_detected,
+                                --   smoke_detected, fire_detected, welfare_alert, traffic_alert
       confidence    REAL
       description   TEXT
       snapshot_path TEXT
       raw_meta      JSONB
+      track_id      INTEGER     -- ByteTrack person ID
+      direction     TEXT        -- 'in' or 'out'
     """
 
     sql_prompt = f"""You are a PostgreSQL expert. Given this schema:
