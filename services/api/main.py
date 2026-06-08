@@ -238,3 +238,65 @@ def chat(req: ChatRequest):
     log.info(f"Chat request: {req.message}")
     answer, sql = query_events_db(req.message)
     return ChatResponse(answer=answer, sql_used=sql)
+
+@app.get("/lease/profile")
+def lease_profile(track_id: int):
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT
+                track_id,
+                camera_id,
+                DATE(created_at) as date,
+                MIN(CASE WHEN event_type = 'person_entered' THEN created_at END) as first_entry,
+                MAX(CASE WHEN event_type = 'person_exited'  THEN created_at END) as last_exit,
+                EXTRACT(EPOCH FROM (
+                    MAX(CASE WHEN event_type = 'person_exited'  THEN created_at END) -
+                    MIN(CASE WHEN event_type = 'person_entered' THEN created_at END)
+                )) / 3600 as hours_present
+            FROM events
+            WHERE track_id = %(track_id)s
+              AND event_type IN ('person_entered', 'person_exited')
+            GROUP BY track_id, camera_id, DATE(created_at)
+            ORDER BY date DESC
+        """, {"track_id": track_id})
+        days = cur.fetchall()
+
+        cur.execute("""
+            SELECT
+                EXTRACT(HOUR FROM created_at) as hour,
+                COUNT(*) as entries
+            FROM events
+            WHERE track_id = %(track_id)s
+              AND event_type = 'person_entered'
+            GROUP BY hour
+            ORDER BY hour
+        """, {"track_id": track_id})
+        hourly = cur.fetchall()
+
+    return {
+        "track_id":    track_id,
+        "days":        days,
+        "hourly_pattern": hourly,
+        "total_days":  len(days),
+    }
+
+@app.get("/lease/all")
+def lease_all():
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT
+                track_id,
+                camera_id,
+                COUNT(DISTINCT DATE(created_at)) as active_days,
+                MIN(created_at) as first_seen,
+                MAX(created_at) as last_seen,
+                AVG(EXTRACT(HOUR FROM created_at)) FILTER (WHERE event_type = 'person_entered') as avg_entry_hour,
+                AVG(EXTRACT(HOUR FROM created_at)) FILTER (WHERE event_type = 'person_exited')  as avg_exit_hour
+            FROM events
+            WHERE event_type IN ('person_entered', 'person_exited')
+              AND track_id IS NOT NULL
+            GROUP BY track_id, camera_id
+            ORDER BY active_days DESC
+        """)
+        rows = cur.fetchall()
+    return {"profiles": rows, "total": len(rows)}
